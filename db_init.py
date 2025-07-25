@@ -8,7 +8,7 @@ It supports configuration via environment variables or command line arguments.
 
 Usage:
     python db_init_new.py --host localhost --username postgres --password mypass --database media_rec
-    
+
     Or using environment variables:
     export POSTGRES_HOST=localhost
     export POSTGRES_USERNAME=postgres
