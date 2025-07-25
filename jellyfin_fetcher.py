@@ -8,14 +8,14 @@ It supports incremental syncing and handles various media types (movies, TV show
 NICK'S CONNECTION!!!!! python jellyfin_fetcher.py --db-host http://192.168.0.20 --db-username postgres --db-password 8g1k9ap2 --db-name media_rec --jellyfin-host http://192.168.0.20:8096 --incremental
 
 Usage:
-    python jellyfin_library_fetcher.py --jellyfin-host http://localhost:8096 --db-host localhost --db-username postgres --db-password mypass --db-name media_rec
+    python jellyfin_fetcher.py --jellyfin-host http://localhost:8096 --db-host localhost --db-username postgres --db-password mypass --db-name media_rec
     Or using environment variables:
     export JELLYFIN_HOST=http://localhost:8096
     export POSTGRES_HOST=localhost
     export POSTGRES_USERNAME=postgres  
     export POSTGRES_PASSWORD=mypass
     export POSTGRES_DATABASE=media_rec
-    python jellyfin_library_fetcher.py
+    python jellyfin_fetcher.py
 """
 
 import argparse
@@ -36,8 +36,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
+        log_folder = 'logs'
+        log_file = 'jellyfin_sync.log'
+        log_path = os.path.join(log_folder, log_file)
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler('jellyfin_sync.log')
+        logging.FileHandler(log_path)
     ]
 )
 logger = logging.getLogger(__name__)

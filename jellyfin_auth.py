@@ -178,7 +178,7 @@ def get_credentials():
     args = parser.parse_args()
     
     # Get values from command line args, environment variables, or interactive input
-    server_url = args.server or os.getenv('JELLYFIN_SERVER_URL')
+    server_url = args.server or os.getenv('JELLYFIN_HOST')
     username = args.username or os.getenv('JELLYFIN_USERNAME')
     password = args.password or os.getenv('JELLYFIN_PASSWORD')
     

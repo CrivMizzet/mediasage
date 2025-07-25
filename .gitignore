@@ -1,4 +1,7 @@
+.env
 *.log
 *.pyc
 jellyfin_token.json
 __pycache__/
+logs/
+dev_tools/
