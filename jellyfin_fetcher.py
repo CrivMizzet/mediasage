@@ -5,9 +5,10 @@ Jellyfin Library Fetcher for Media Recommendation System
 This script fetches media library data from Jellyfin and populates the PostgreSQL database.
 It supports incremental syncing and handles various media types (movies, TV shows, etc.).
 
+NICK'S CONNECTION!!!!! python jellyfin_fetcher.py --db-host http://192.168.0.20 --db-username postgres --db-password 8g1k9ap2 --db-name media_rec --jellyfin-host http://192.168.0.20:8096 --incremental
+
 Usage:
     python jellyfin_library_fetcher.py --jellyfin-host http://localhost:8096 --db-host localhost --db-username postgres --db-password mypass --db-name media_rec
-    
     Or using environment variables:
     export JELLYFIN_HOST=http://localhost:8096
     export POSTGRES_HOST=localhost

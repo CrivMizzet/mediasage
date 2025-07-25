@@ -3,6 +3,9 @@
 Simple Jellyfin Authentication Script
 Connects to Jellyfin server, authenticates, and stores the access token.
 Supports dynamic configuration via command line arguments, environment variables, or interactive input.
+
+NICK'S CONNECTION!!!!! python jellyfin_auth.py --username admin --password 8g1k9ap2 --server http://192.168.0.20:8096
+
 """
 
 import requests

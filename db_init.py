@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
 """
-Database Initialization Script for Media Recommendation System
+Database Initialization Script for Media Recommendation System with Ollama Integration
 
-This script initializes the PostgreSQL database schema for the media recommendation system.
+This script initializes the PostgreSQL database schema for the media recommendation system
+including Ollama analysis capabilities and processing queue management.
 It supports configuration via environment variables or command line arguments.
 
 Usage:
-    python db_init.py --host localhost --username postgres --password mypass --database media_rec
+    python db_init_new.py --host localhost --username postgres --password mypass --database media_rec
     
     Or using environment variables:
     export POSTGRES_HOST=localhost
     export POSTGRES_USERNAME=postgres
     export POSTGRES_PASSWORD=mypass
     export POSTGRES_DATABASE=media_rec
-    python db_init.py
+    python db_init_new.py
 """
 
 import argparse
@@ -38,7 +39,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 class DatabaseInitializer:
-    """Handles PostgreSQL database initialization for the media recommendation system."""
+    """Handles PostgreSQL database initialization for the media recommendation system with Ollama integration."""
     
     def __init__(self, host: str, port: int, username: str, password: str, database: str):
         """
@@ -262,7 +263,7 @@ class DatabaseInitializer:
             'media_credits', 'users', 'user_activity', 'ollama_analysis',
             'analysis_tags', 'media_analysis_tags', 'external_api_cache',
             'recommendations', 'recommendation_feedback', 'sync_operations',
-            'system_config'
+            'system_config', 'analysis_queue', 'media_profiles', 'media_embeddings'
         ]
         
         try:
@@ -307,6 +308,19 @@ class DatabaseInitializer:
             triggers = cursor.fetchall()
             logger.info(f"Found {len(triggers)} update triggers")
             
+            # Check for jellyfin_etag column
+            cursor.execute("""
+                SELECT column_name 
+                FROM information_schema.columns 
+                WHERE table_name = 'media_items' AND column_name = 'jellyfin_etag'
+            """)
+            
+            etag_column = cursor.fetchone()
+            if etag_column:
+                logger.info("jellyfin_etag column found in media_items table")
+            else:
+                logger.warning("jellyfin_etag column missing from media_items table")
+            
             cursor.close()
             
             logger.info(f"Schema verification passed. Found {len(existing_tables)} tables, {len(functions)} functions, {len(triggers)} triggers.")
@@ -324,11 +338,10 @@ class DatabaseInitializer:
 
 def get_sql_schema() -> str:
     """
-    Return the SQL schema as a string.
-    This contains the same schema from the previous artifact.
+    Return the complete SQL schema as a string, including Ollama integration features.
     """
     return """
--- Media Recommendation System Database Schema
+-- Media Recommendation System Database Schema with Ollama Integration
 -- PostgreSQL Database Design
 
 -- Enable UUID extension for unique identifiers
@@ -342,6 +355,7 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 CREATE TABLE media_items (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     jellyfin_id VARCHAR(255) UNIQUE NOT NULL,
+    jellyfin_etag VARCHAR(255), -- Added for Jellyfin sync optimization
     title VARCHAR(255) NOT NULL,
     original_title VARCHAR(255),
     media_type VARCHAR(50) NOT NULL CHECK (media_type IN ('movie', 'series', 'season', 'episode', 'music', 'book')),
@@ -454,21 +468,68 @@ CREATE TABLE user_activity (
 );
 
 -- ============================================================================
--- AI ANALYSIS TABLES
+-- AI ANALYSIS TABLES (OLLAMA INTEGRATION)
 -- ============================================================================
 
--- Ollama analysis results
+-- Ollama analysis results (enhanced)
 CREATE TABLE ollama_analysis (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     media_item_id UUID REFERENCES media_items(id) ON DELETE CASCADE,
     analysis_type VARCHAR(100) NOT NULL, -- 'content_analysis', 'sentiment', 'themes', etc.
     model_used VARCHAR(100) NOT NULL, -- Which Ollama model was used
     prompt_version VARCHAR(50), -- Track prompt versions for consistency
+    analysis_version VARCHAR(20), -- Version of analysis algorithm
     analysis_result JSONB NOT NULL, -- Store the full analysis as JSON
     confidence_score DECIMAL(4,3), -- 0-1 confidence in the analysis
     processing_time_ms INTEGER,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(media_item_id, analysis_type, model_used)
+);
+
+-- Analysis processing queue
+CREATE TABLE analysis_queue (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    media_item_id UUID REFERENCES media_items(id) ON DELETE CASCADE,
+    analysis_type VARCHAR(50) NOT NULL,
+    status VARCHAR(20) DEFAULT 'pending' CHECK (status IN ('pending', 'processing', 'completed', 'failed')),
+    priority INTEGER DEFAULT 5,
+    attempts INTEGER DEFAULT 0,
+    error_message TEXT,
+    metadata JSONB, -- Store additional processing parameters
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(media_item_id, analysis_type)
+);
+
+-- Media profile summaries for quick access
+CREATE TABLE media_profiles (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    media_item_id UUID REFERENCES media_items(id) ON DELETE CASCADE UNIQUE,
+    primary_themes TEXT[],
+    mood_tags TEXT[],
+    style_descriptors TEXT[],
+    target_audience VARCHAR(100),
+    complexity_level INTEGER CHECK (complexity_level >= 1 AND complexity_level <= 10),
+    emotional_intensity INTEGER CHECK (emotional_intensity >= 1 AND emotional_intensity <= 10),
+    recommended_viewing_context TEXT,
+    content_warnings TEXT[],
+    similar_to_ids UUID[], -- Array of similar media UUIDs
+    profile_complete BOOLEAN DEFAULT FALSE,
+    profile_version VARCHAR(20) DEFAULT '1.0',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Embeddings storage (temporary before moving to QDrant)
+CREATE TABLE media_embeddings (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    media_item_id UUID REFERENCES media_items(id) ON DELETE CASCADE,
+    embedding_type VARCHAR(50) NOT NULL, -- 'content', 'style', 'theme', etc.
+    embedding_vector FLOAT[], -- Temporary storage before QDrant
+    embedding_model VARCHAR(100) NOT NULL,
+    vector_dimension INTEGER,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(media_item_id, embedding_type, embedding_model)
 );
 
 -- Extracted themes and tags from analysis
@@ -586,6 +647,7 @@ CREATE INDEX idx_media_items_type ON media_items(media_type);
 CREATE INDEX idx_media_items_date_added ON media_items(date_added);
 CREATE INDEX idx_media_items_rating ON media_items(community_rating DESC);
 CREATE INDEX idx_media_items_jellyfin_id ON media_items(jellyfin_id);
+CREATE INDEX idx_media_items_jellyfin_etag ON media_items(jellyfin_etag);
 CREATE INDEX idx_media_items_available ON media_items(is_available) WHERE is_available = true;
 
 -- User activity indexes
@@ -596,7 +658,25 @@ CREATE INDEX idx_user_activity_last_watched ON user_activity(last_watched DESC);
 -- Analysis indexes
 CREATE INDEX idx_ollama_analysis_media ON ollama_analysis(media_item_id);
 CREATE INDEX idx_ollama_analysis_type ON ollama_analysis(analysis_type);
+CREATE INDEX idx_ollama_analysis_media_type ON ollama_analysis(media_item_id, analysis_type);
+CREATE INDEX idx_ollama_analysis_confidence ON ollama_analysis(confidence_score DESC);
 CREATE INDEX idx_media_tags_relevance ON media_analysis_tags(relevance_score DESC);
+
+-- Analysis queue indexes
+CREATE INDEX idx_analysis_queue_status ON analysis_queue(status);
+CREATE INDEX idx_analysis_queue_priority ON analysis_queue(priority DESC, created_at ASC);
+CREATE INDEX idx_analysis_queue_media ON analysis_queue(media_item_id);
+
+-- Media profiles indexes
+CREATE INDEX idx_media_profiles_complete ON media_profiles(profile_complete);
+CREATE INDEX idx_media_profiles_complexity ON media_profiles(complexity_level);
+CREATE INDEX idx_media_profiles_intensity ON media_profiles(emotional_intensity);
+CREATE INDEX idx_media_profiles_themes ON media_profiles USING GIN(primary_themes);
+CREATE INDEX idx_media_profiles_moods ON media_profiles USING GIN(mood_tags);
+
+-- Embeddings indexes
+CREATE INDEX idx_media_embeddings_type ON media_embeddings(embedding_type);
+CREATE INDEX idx_media_embeddings_media ON media_embeddings(media_item_id);
 
 -- External API cache index
 CREATE INDEX idx_external_cache_expires ON external_api_cache(expires_at);
@@ -628,17 +708,151 @@ CREATE TRIGGER update_users_updated_at BEFORE UPDATE ON users
 CREATE TRIGGER update_user_activity_updated_at BEFORE UPDATE ON user_activity
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
+CREATE TRIGGER update_analysis_queue_updated_at 
+    BEFORE UPDATE ON analysis_queue
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+CREATE TRIGGER update_media_profiles_updated_at 
+    BEFORE UPDATE ON media_profiles
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+-- ============================================================================
+-- UTILITY FUNCTIONS FOR OLLAMA PROCESSING
+-- ============================================================================
+
+-- Function to get media items ready for analysis
+CREATE OR REPLACE FUNCTION get_media_for_analysis(
+    batch_size INTEGER DEFAULT 10,
+    analysis_type VARCHAR DEFAULT 'thematic_analysis'
+) RETURNS TABLE (
+    media_id UUID,
+    title VARCHAR,
+    media_type VARCHAR,
+    overview TEXT,
+    genres TEXT[]
+) AS $$
+BEGIN
+    RETURN QUERY
+    SELECT 
+        mi.id,
+        mi.title,
+        mi.media_type,
+        mi.overview,
+        ARRAY_AGG(g.name) as genres
+    FROM media_items mi
+    LEFT JOIN media_genres mg ON mi.id = mg.media_item_id
+    LEFT JOIN genres g ON mg.genre_id = g.id
+    WHERE mi.is_available = true
+    AND mi.id NOT IN (
+        SELECT media_item_id 
+        FROM ollama_analysis 
+        WHERE analysis_type = get_media_for_analysis.analysis_type
+    )
+    AND mi.id NOT IN (
+        SELECT media_item_id 
+        FROM analysis_queue 
+        WHERE analysis_type = get_media_for_analysis.analysis_type 
+        AND status IN ('pending', 'processing')
+    )
+    GROUP BY mi.id, mi.title, mi.media_type, mi.overview
+    ORDER BY mi.date_added DESC
+    LIMIT batch_size;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Function to add items to analysis queue
+CREATE OR REPLACE FUNCTION queue_media_for_analysis(
+    media_ids UUID[],
+    analysis_type VARCHAR DEFAULT 'thematic_analysis',
+    priority INTEGER DEFAULT 5
+) RETURNS INTEGER AS $$
+DECLARE
+    media_id UUID;
+    inserted_count INTEGER := 0;
+BEGIN
+    FOREACH media_id IN ARRAY media_ids
+    LOOP
+        INSERT INTO analysis_queue (media_item_id, analysis_type, priority)
+        VALUES (media_id, analysis_type, priority)
+        ON CONFLICT (media_item_id, analysis_type) 
+        DO UPDATE SET 
+            status = 'pending',
+            priority = EXCLUDED.priority,
+            updated_at = CURRENT_TIMESTAMP;
+        
+        inserted_count := inserted_count + 1;
+    END LOOP;
+    
+    RETURN inserted_count;
+END;
+$$ LANGUAGE plpgsql;
+
+-- ============================================================================
+-- VIEWS FOR EASY DATA ACCESS
+-- ============================================================================
+
+-- View for media with complete profiles
+CREATE OR REPLACE VIEW media_with_profiles AS
+SELECT 
+    mi.id,
+    mi.title,
+    mi.media_type,
+    mi.release_date,
+    mi.overview,
+    mp.primary_themes,
+    mp.mood_tags,
+    mp.style_descriptors,
+    mp.target_audience,
+    mp.complexity_level,
+    mp.emotional_intensity,
+    mp.profile_complete,
+    mp.updated_at as profile_updated_at,
+    ARRAY_AGG(DISTINCT g.name) as genres
+FROM media_items mi
+LEFT JOIN media_profiles mp ON mi.id = mp.media_item_id
+LEFT JOIN media_genres mg ON mi.id = mg.media_item_id
+LEFT JOIN genres g ON mg.genre_id = g.id
+WHERE mi.is_available = true
+GROUP BY mi.id, mi.title, mi.media_type, mi.release_date, mi.overview,
+         mp.primary_themes, mp.mood_tags, mp.style_descriptors, mp.target_audience,
+         mp.complexity_level, mp.emotional_intensity, mp.profile_complete, mp.updated_at;
+
+-- View for analysis queue status
+CREATE OR REPLACE VIEW analysis_queue_status AS
+SELECT 
+    analysis_type,
+    status,
+    COUNT(*) as count,
+    AVG(attempts) as avg_attempts,
+    MIN(created_at) as oldest_queued,
+    MAX(updated_at) as last_updated
+FROM analysis_queue
+GROUP BY analysis_type, status
+ORDER BY analysis_type, status;
+
 -- ============================================================================
 -- INITIAL CONFIGURATION DATA
 -- ============================================================================
 
--- Insert some basic configuration
+-- Insert system configuration with Ollama settings
 INSERT INTO system_config (key, value, description) VALUES
-('schema_version', '"1.0.0"', 'Database schema version'),
+('schema_version', '"2.0.0"', 'Database schema version with Ollama integration'),
 ('last_full_sync', 'null', 'Timestamp of last full Jellyfin sync'),
-('ollama_default_model', '"llama2"', 'Default Ollama model for analysis'),
+('ollama_host', '"http://localhost:11434"', 'Ollama server endpoint'),
+('ollama_default_model', '"llama3.1"', 'Default Ollama model for analysis'),
+('ollama_batch_size', '10', 'Number of media items to process in one batch'),
+('ollama_max_retries', '3', 'Maximum retry attempts for failed analysis'),
+('ollama_timeout_seconds', '120', 'Timeout for Ollama API calls'),
+('analysis_prompt_version', '"1.0"', 'Current version of analysis prompts'),
+('enable_background_processing', 'true', 'Enable automatic background analysis'),
+('qdrant_host', '"http://localhost:6333"', 'QDrant vector database endpoint'),
+('embedding_model', '"nomic-embed-text"', 'Model used for generating embeddings'),
 ('recommendation_refresh_hours', '24', 'Hours between recommendation refreshes'),
-('max_recommendations_per_user', '50', 'Maximum recommendations to store per user');
+('max_recommendations_per_user', '50', 'Maximum recommendations to store per user')
+
+ON CONFLICT (key) DO UPDATE SET 
+    value = EXCLUDED.value,
+    updated_at = CURRENT_TIMESTAMP;
 
 -- Add some common genres (you can expand this list)
 INSERT INTO genres (name) VALUES
@@ -647,9 +861,11 @@ INSERT INTO genres (name) VALUES
 ('Horror'), ('Music'), ('Mystery'), ('Romance'), ('Science Fiction'),
 ('TV Movie'), ('Thriller'), ('War'), ('Western'), ('Biography'),
 ('Musical'), ('Sport'), ('Film-Noir'), ('News'), ('Reality-TV'),
-('Talk-Show'), ('Game-Show'), ('Short');
+('Talk-Show'), ('Game-Show'), ('Short')
 
--- Add common analysis tag categories
+ON CONFLICT (name) DO NOTHING;
+
+-- Add analysis tags including both original and Ollama-specific ones
 INSERT INTO analysis_tags (tag_name, tag_category, description) VALUES
 ('fast-paced', 'pacing', 'Content with quick scene changes and high energy'),
 ('slow-burn', 'pacing', 'Content that builds tension gradually'),
@@ -660,13 +876,31 @@ INSERT INTO analysis_tags (tag_name, tag_category, description) VALUES
 ('violence', 'content_warning', 'Contains violent scenes'),
 ('strong-language', 'content_warning', 'Contains profanity or strong language'),
 ('complex-plot', 'complexity', 'Intricate storyline requiring attention'),
-('ensemble-cast', 'structure', 'Features multiple main characters');
+('ensemble-cast', 'structure', 'Features multiple main characters'),
+('thematic_analysis', 'analysis_type', 'Deep analysis of themes and meaning'),
+('style_analysis', 'analysis_type', 'Analysis of visual and narrative style'),
+('audience_analysis', 'analysis_type', 'Target audience and viewing context analysis'),
+('emotional_analysis', 'analysis_type', 'Emotional journey and intensity analysis'),
+('similarity_analysis', 'analysis_type', 'Content similarity and recommendation markers'),
+('high_concept', 'complexity', 'Abstract or philosophical themes'),
+('accessible', 'complexity', 'Easy to understand and follow'),
+('atmospheric', 'style', 'Strong mood and atmosphere'),
+('dialogue_heavy', 'style', 'Conversation-focused storytelling'),
+('visual_spectacle', 'style', 'Emphasis on visual elements'),
+('cerebral', 'audience', 'Appeals to intellectual viewers'),
+('mainstream', 'audience', 'Broad appeal audience'),
+('niche', 'audience', 'Specialized or cult following'),
+('binge_worthy', 'viewing_context', 'Good for extended viewing sessions'),
+('casual_viewing', 'viewing_context', 'Good for background or casual watching'),
+('focused_viewing', 'viewing_context', 'Requires full attention')
+
+ON CONFLICT (tag_name) DO NOTHING;
 """
 
 def parse_arguments():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
-        description="Initialize PostgreSQL database schema for Media Recommendation System"
+        description="Initialize PostgreSQL database schema for Media Recommendation System with Ollama Integration"
     )
     
     parser.add_argument(
@@ -733,7 +967,7 @@ def main():
         logger.error("PostgreSQL password is required. Set via --password or POSTGRES_PASSWORD environment variable.")
         sys.exit(1)
     
-    logger.info("Starting database initialization...")
+    logger.info("Starting database initialization with Ollama integration...")
     logger.info(f"Target: {args.username}@{args.host}:{args.port}/{args.database}")
     
     # Initialize database handler
@@ -776,7 +1010,7 @@ def main():
                 sys.exit(1)
         else:
             # Execute the schema creation
-            logger.info("Executing database schema...")
+            logger.info("Executing database schema with Ollama integration...")
             sql_schema = get_sql_schema()
             
             if not db_init.execute_sql_file(sql_schema):
@@ -789,7 +1023,12 @@ def main():
                 sys.exit(1)
             
             logger.info("Database initialization completed successfully!")
-            logger.info(f"Database '{args.database}' is ready for use.")
+            logger.info(f"Database '{args.database}' is ready for use with Ollama integration.")
+            logger.info("Schema includes:")
+            logger.info("  - Core media tables with jellyfin_etag support")
+            logger.info("  - Ollama analysis and processing queue tables")
+            logger.info("  - Media profiles and embeddings storage")
+            logger.info("  - Enhanced analysis tags and configuration")
     
     except KeyboardInterrupt:
         logger.info("Initialization cancelled by user")
