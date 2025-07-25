@@ -1,0 +1,7 @@
+requests
+argparse
+urljoin
+typing 
+Dict
+Optional
+psycopg2
