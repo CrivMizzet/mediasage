@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """
 Enhanced Ollama Integration Module with Debugging Features
+
+Test Command:
+python ollama_analysis.py  --ollama-url "http://192.168.0.150:11434" --db-host "192.168.0.20" --db-user postgres --db-password 8g1k9ap2 --batch-size 10 --model Mjh1051702/youtube --analysis-type mood_analysis
 """
 
 import json
