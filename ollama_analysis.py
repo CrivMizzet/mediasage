@@ -81,7 +81,7 @@ class OllamaClient:
         if self.session:
             await self.session.close()
     
-    async def generate(self, model: str, prompt: str, system: str = None) -> Dict[str, Any]:
+    async def generate(self, model: str, prompt: str, system: str = None) -> Dict[str, Any]: # type: ignore
         """Generate response from Ollama model"""
         if not self.session:
             raise RuntimeError("OllamaClient must be used as async context manager")
@@ -237,7 +237,7 @@ class DatabaseManager:
         
     def get_connection(self):
         """Get database connection"""
-        return psycopg2.connect(**self.connection_params)
+        return psycopg2.connect(**self.connection_params) # type: ignore
     
     def get_media_for_analysis(self, limit: int = 50, analysis_type: AnalysisType = AnalysisType.CONTENT_PROFILE) -> List[MediaItem]:
         """Get media items that need analysis"""
@@ -347,7 +347,7 @@ class DatabaseManager:
                 conn.commit()
     
     def update_queue_status(self, media_item_id: str, analysis_type: str, 
-                           status: str, error_message: str = None) -> None:
+                           status: str, error_message: str = None) -> None: # type: ignore
         """Update analysis queue status"""
         query = """
         UPDATE analysis_queue 
@@ -408,7 +408,7 @@ def extract_json_from_response(response_text: str) -> Dict[str, Any]:
 class MediaAnalyzer:
     """Main class for analyzing media content with Ollama"""
     
-    def __init__(self, db_manager: DatabaseManager, ollama_url: str, default_model: str = None, debug_mode: bool = False):
+    def __init__(self, db_manager: DatabaseManager, ollama_url: str, default_model: str = None, debug_mode: bool = False): # type: ignore
         self.db = db_manager
         self.ollama_url = ollama_url
         self.default_model = default_model or 'llama3:latest'
@@ -418,7 +418,7 @@ class MediaAnalyzer:
         
     async def analyze_media_item(self, media_item: MediaItem, 
                                 analysis_type: AnalysisType = AnalysisType.CONTENT_PROFILE,
-                                model: str = None) -> Optional[AnalysisResult]:
+                                model: str = None) -> Optional[AnalysisResult]: # type: ignore
         """Analyze a single media item"""
         model_to_use = model or self.default_model
         start_time = time.time()
@@ -528,7 +528,7 @@ class MediaAnalyzer:
     
     async def batch_analyze(self, limit: int = 10, 
                            analysis_type: AnalysisType = AnalysisType.CONTENT_PROFILE,
-                           model: str = None) -> List[AnalysisResult]:
+                           model: str = None) -> List[AnalysisResult]: # type: ignore
         """Analyze multiple media items in batch"""
         media_items = self.db.get_media_for_analysis(limit, analysis_type)
         
@@ -557,7 +557,7 @@ class MediaAnalyzer:
         return results
 
 
-def get_ollama_url(args_url: str = None) -> str:
+def get_ollama_url(args_url: str = None) -> str: # type: ignore
     """Get Ollama URL from environment variable or argument"""
     if args_url:
         return args_url
@@ -568,7 +568,7 @@ def get_ollama_url(args_url: str = None) -> str:
     
     return "http://localhost:11434"
 
-def get_ollama_model(args_model: str = None) -> str:
+def get_ollama_model(args_model: str = None) -> str: # type: ignore
     """Get Ollama model from environment variable or argument"""
     if args_model:
         return args_model

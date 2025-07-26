@@ -59,7 +59,7 @@ class VectorEmbedder:
     def _create_tracking_table(self):
         """Create the embedding_status tracking table."""
         try:
-            cursor = self.postgres_conn.cursor()
+            cursor = self.postgres_conn.cursor() # type: ignore
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS embedding_status (
                     analysis_id UUID PRIMARY KEY,
@@ -113,11 +113,11 @@ class VectorEmbedder:
         for collection_name, config in collections_config.items():
             try:
                 # Check if collection exists
-                collections = self.qdrant_client.get_collections().collections
+                collections = self.qdrant_client.get_collections().collections # type: ignore
                 collection_exists = any(c.name == collection_name for c in collections)
                 
                 if not collection_exists:
-                    self.qdrant_client.create_collection(
+                    self.qdrant_client.create_collection( # type: ignore
                         collection_name=collection_name,
                         vectors_config=config["vectors"]
                     )
@@ -157,7 +157,7 @@ class VectorEmbedder:
     def get_existing_embeddings(self) -> set:
         """Get set of already embedded analysis IDs from PostgreSQL tracking table."""
         try:
-            cursor = self.postgres_conn.cursor()
+            cursor = self.postgres_conn.cursor() # type: ignore
             
             # Get existing embeddings for current model
             cursor.execute("""
@@ -175,7 +175,7 @@ class VectorEmbedder:
             self.logger.warning(f"Could not fetch existing embeddings: {e}")
             return set()
     
-    def fetch_media_analysis_data(self, existing_ids: set = None) -> List[Dict[str, Any]]:
+    def fetch_media_analysis_data(self, existing_ids: set = None) -> List[Dict[str, Any]]: # type: ignore
         """Fetch media analysis data from PostgreSQL, optionally filtering already processed."""
         base_query = """
         SELECT 
@@ -212,13 +212,13 @@ class VectorEmbedder:
         """
         
         try:
-            cursor = self.postgres_conn.cursor()
+            cursor = self.postgres_conn.cursor() # type: ignore
             if existing_ids and len(existing_ids) > 0:
                 cursor.execute(query, list(existing_ids))
             else:
                 cursor.execute(query)
                 
-            columns = [desc[0] for desc in cursor.description]
+            columns = [desc[0] for desc in cursor.description] # type: ignore
             results = []
             
             for row in cursor.fetchall():
@@ -352,7 +352,7 @@ Philosophical Questions: {', '.join(analysis_result.get('philosophical_questions
             return
             
         try:
-            cursor = self.postgres_conn.cursor()
+            cursor = self.postgres_conn.cursor() # type: ignore
             values = [(aid, self.config['embed_model']) for aid in analysis_ids]
             
             cursor.executemany("""
@@ -418,13 +418,13 @@ Philosophical Questions: {', '.join(analysis_result.get('philosophical_questions
         # Store in Qdrant
         try:
             if content_points:
-                self.qdrant_client.upsert(
+                self.qdrant_client.upsert( # type: ignore
                     collection_name="media_content",
                     points=content_points
                 )
                 
             if analysis_points:
-                self.qdrant_client.upsert(
+                self.qdrant_client.upsert( # type: ignore
                     collection_name="media_analysis",
                     points=analysis_points
                 )
