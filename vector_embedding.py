@@ -3,7 +3,11 @@
 Vector Embedding Script for Media Recommendation System
 
 This script processes media analysis data from PostgreSQL and creates
-vector embeddings using Ollama, storing them in Qdrant collections.
+vector embeddings using BGE-M3 model with both dense and sparse vectors,
+storing them in Qdrant collections.
+
+python bge_embedding.py --db-host "192.168.0.39" --db-user postgres --db-password 8g1k9ap2 --db-name media_rec --qdrant-host 192.168.0.20 --qdrant-port 6333 --embed-host 192.168.0.150 --embed-port 11434 --embed-model bge-m3:latest --batch-size 10
+
 """
 
 import argparse
@@ -12,14 +16,15 @@ import logging
 import os
 import sys
 import uuid
-from datetime import datetime
+from datetime import datetime, date
 from typing import Dict, List, Optional, Tuple, Any
 
 import psycopg2
+from psycopg2 import extras
 import requests
 from qdrant_client import QdrantClient
 from qdrant_client.http import models
-from qdrant_client.http.models import Distance, VectorParams, PointStruct
+from qdrant_client.http.models import Distance, VectorParams, PointStruct, SparseVectorParams, SparseIndexParams
 
 
 class VectorEmbedder:
@@ -49,7 +54,7 @@ class VectorEmbedder:
                 password=self.config['db_password'],
                 database=self.config['db_name']
             )
-            self.postgres_conn.autocommit = True  # Enable autocommit for DDL operations
+            self.postgres_conn.autocommit = False
             self.logger.info("Connected to PostgreSQL")
             self._create_tracking_table()
         except Exception as e:
@@ -57,20 +62,49 @@ class VectorEmbedder:
             sys.exit(1)
             
     def _create_tracking_table(self):
-        """Create the embedding_status tracking table."""
+        """Create or update the embedding_status tracking table."""
+        if not self.postgres_conn:
+            self.logger.error("PostgreSQL connection not available.")
+            return
         try:
-            cursor = self.postgres_conn.cursor() # type: ignore
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS embedding_status (
-                    analysis_id UUID PRIMARY KEY,
-                    embedded_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                    embedding_model VARCHAR(100)
-                )
-            """)
-            cursor.close()
-            self.logger.info("Ensured embedding_status table exists")
-        except Exception as e:
-            self.logger.error(f"Failed to create tracking table: {e}")
+            with self.postgres_conn.cursor() as cursor:
+                # Check if embedding_status table exists
+                cursor.execute("SELECT to_regclass('public.embedding_status');")
+                result = cursor.fetchone()
+                table_exists = result[0] if result else None
+
+                if table_exists:
+                    # Check if the primary key is on 'analysis_id'
+                    cursor.execute("""
+                        SELECT COUNT(*)
+                        FROM pg_constraint
+                        JOIN pg_attribute ON pg_attribute.attrelid = pg_constraint.conrelid AND pg_attribute.attnum = pg_constraint.conkey[1]
+                        WHERE pg_constraint.conrelid = 'embedding_status'::regclass
+                        AND pg_constraint.contype = 'p'
+                        AND pg_attribute.attname = 'analysis_id'
+                        AND array_length(pg_constraint.conkey, 1) = 1;
+                    """)
+                    result = cursor.fetchone()
+                    is_old_schema = result[0] > 0 if result else False
+                    if is_old_schema:
+                        self.logger.info("Old embedding_status table schema detected. Dropping and recreating.")
+                        cursor.execute("DROP TABLE embedding_status;")
+
+                # Create the table with the correct schema
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS embedding_status (
+                        media_item_id UUID NOT NULL,
+                        embedding_model VARCHAR(100) NOT NULL,
+                        embedded_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                        PRIMARY KEY (media_item_id, embedding_model)
+                    )
+                """)
+            self.postgres_conn.commit()
+            self.logger.info("Ensured embedding_status table exists with correct schema.")
+        except psycopg2.Error as e:
+            self.logger.error(f"Failed to create or update tracking table: {e}")
+            if self.postgres_conn:
+                self.postgres_conn.rollback()
             
     def connect_qdrant(self):
         """Establish Qdrant connection and ensure collections exist."""
@@ -86,45 +120,37 @@ class VectorEmbedder:
             sys.exit(1)
             
     def setup_qdrant_collections(self):
-        """Create or update Qdrant collections with proper schema."""
-        collections_config = {
-            "media_content": {
-                "vectors": VectorParams(size=768, distance=Distance.COSINE),
-                "indexes": [
-                    ("media_item_id", "keyword"),
-                    ("media_type", "keyword"),
-                    ("genres", "keyword"),
-                    ("release_year", "integer")
-                ]
-            },
-            "media_analysis": {
-                "vectors": VectorParams(size=768, distance=Distance.COSINE),
-                "indexes": [
-                    ("media_item_id", "keyword"),
-                    ("analysis_type", "keyword"),
-                    ("mood_tags", "keyword"),
-                    ("target_audience", "keyword"),
-                    ("complexity_level", "integer"),
-                    ("emotional_intensity", "integer")
-                ]
-            }
-        }
-        
-        for collection_name, config in collections_config.items():
+        """Create or update Qdrant collections with proper schema for BGE-M3."""
+        if not self.qdrant_client:
+            self.logger.error("Qdrant client not available.")
+            return
+        analysis_types = [
+            "content_profile", "theme_analysis", "mood_analysis", 
+            "similarity_analysis", "recommendation_profile"
+        ]
+        collection_names = ["media_content"] + [f"analysis_{atype}" for atype in analysis_types]
+
+        for collection_name in collection_names:
             try:
-                # Check if collection exists
-                collections = self.qdrant_client.get_collections().collections # type: ignore
+                collections = self.qdrant_client.get_collections().collections
                 collection_exists = any(c.name == collection_name for c in collections)
-                
+
                 if not collection_exists:
-                    self.qdrant_client.create_collection( # type: ignore
+                    self.qdrant_client.create_collection(
                         collection_name=collection_name,
-                        vectors_config=config["vectors"]
+                        vectors_config={
+                            "dense": models.VectorParams(size=1024, distance=models.Distance.COSINE),
+                        },
+                        sparse_vectors_config={
+                            "sparse": models.SparseVectorParams(
+                                index=models.SparseIndexParams(on_disk=False)
+                            )
+                        }
                     )
                     self.logger.info(f"Created collection: {collection_name}")
                 else:
                     self.logger.info(f"Collection already exists: {collection_name}")
-                    
+
             except Exception as e:
                 self.logger.error(f"Failed to setup collection {collection_name}: {e}")
                 
@@ -136,105 +162,162 @@ class VectorEmbedder:
             return ', '.join(str(item) for item in data)
         else:
             return str(data)
+
+    def _parse_date(self, date_val: Optional[Any]) -> Optional[datetime]:
+        """Safely parse date values that might be strings or date/datetime objects."""
+        if isinstance(date_val, datetime):
+            return date_val
+        if isinstance(date_val, date):
+            return datetime.combine(date_val, datetime.min.time())
+        if isinstance(date_val, str):
+            try:
+                # Handle ISO format with or without timezone
+                if 'Z' in date_val or '+' in date_val:
+                    return datetime.fromisoformat(date_val.replace('Z', '+00:00'))
+                return datetime.fromisoformat(date_val)
+            except ValueError:
+                try:
+                    # Fallback for other common formats
+                    return datetime.strptime(date_val, '%Y-%m-%d %H:%M:%S.%f%z')
+                except ValueError:
+                    return None
+        return None
             
-    def get_embedding(self, text: str) -> List[float]:
-        """Get embedding vector from Ollama."""
+    def get_bge_m3_embedding(self, text: str) -> Dict[str, Any]:
+        """Get both dense and sparse embedding vectors from BGE-M3 model."""
         try:
             response = requests.post(
                 f"http://{self.config['embed_host']}:{self.config['embed_port']}/api/embeddings",
                 json={
                     "model": self.config['embed_model'],
-                    "prompt": text
+                    "prompt": text,
+                    "options": {
+                        "embedding_only": True,
+                        "truncate": True
+                    }
                 },
-                timeout=30
+                timeout=60
             )
             response.raise_for_status()
-            return response.json()['embedding']
+            result = response.json()
+            
+            if 'embedding' in result:
+                dense_embedding = result['embedding']
+                sparse_embedding = self._create_sparse_embedding(text) if 'sparse_embedding' not in result else result['sparse_embedding']
+                
+                return {
+                    'dense': dense_embedding,
+                    'sparse': sparse_embedding
+                }
+            else:
+                self.logger.error(f"Unexpected response format: {result}")
+                return {'dense': [], 'sparse': {'indices': [], 'values': []}}
+                
         except Exception as e:
-            self.logger.error(f"Failed to get embedding: {e}")
-            return []
+            self.logger.error(f"Failed to get BGE-M3 embedding: {e}")
+            return {'dense': [], 'sparse': {'indices': [], 'values': []}}
+    
+    def _create_sparse_embedding(self, text: str) -> Dict[str, List]:
+        """Create a simple sparse embedding representation from text tokens."""
+        words = text.lower().split()
+        word_counts = {}
+        for word in words:
+            word_counts[word] = word_counts.get(word, 0) + 1
+        
+        temp_vector = {}
+        for word, count in word_counts.items():
+            idx = hash(word) & (2**32 - 1)
+            temp_vector[idx] = max(temp_vector.get(idx, 0.0), float(count))
+
+        sorted_items = sorted(temp_vector.items())
+        
+        indices = [item[0] for item in sorted_items]
+        values = [item[1] for item in sorted_items]
+        
+        return {'indices': indices, 'values': values}
             
     def get_existing_embeddings(self) -> set:
-        """Get set of already embedded analysis IDs from PostgreSQL tracking table."""
+        """Get set of already embedded media_item_ids from PostgreSQL tracking table."""
+        if not self.postgres_conn:
+            self.logger.error("PostgreSQL connection not available.")
+            return set()
         try:
-            cursor = self.postgres_conn.cursor() # type: ignore
+            cursor = self.postgres_conn.cursor()
             
-            # Get existing embeddings for current model
             cursor.execute("""
-                SELECT analysis_id FROM embedding_status 
+                SELECT DISTINCT media_item_id FROM embedding_status
                 WHERE embedding_model = %s
             """, (self.config['embed_model'],))
             
             existing_ids = {str(row[0]) for row in cursor.fetchall()}
             cursor.close()
             
-            self.logger.info(f"Found {len(existing_ids)} existing embeddings for model {self.config['embed_model']}")
+            self.logger.info(f"Found {len(existing_ids)} existing media item embeddings for model {self.config['embed_model']}")
             return existing_ids
             
         except Exception as e:
             self.logger.warning(f"Could not fetch existing embeddings: {e}")
             return set()
-    
-    def fetch_media_analysis_data(self, existing_ids: set = None) -> List[Dict[str, Any]]: # type: ignore
-        """Fetch media analysis data from PostgreSQL, optionally filtering already processed."""
+
+    def fetch_media_analysis_data(self, existing_ids: Optional[set] = None) -> List[Dict[str, Any]]:
+        """Fetch media analysis data from PostgreSQL, grouped by media item."""
+        if not self.postgres_conn:
+            self.logger.error("PostgreSQL connection not available.")
+            return []
+        
         base_query = """
         SELECT 
-            oa.id,
-            oa.media_item_id,
-            oa.analysis_type,
-            oa.model_used,
-            oa.analysis_result,
-            oa.confidence_score,
-            oa.created_at,
+            mi.id as media_item_id,
             mi.title,
             mi.media_type,
             mi.release_date,
             mi.overview,
             mi.tagline,
-            array_agg(DISTINCT g.name) as genres
-        FROM ollama_analysis oa
-        JOIN media_items mi ON oa.media_item_id = mi.id
+            array_agg(DISTINCT g.name) as genres,
+            json_object_agg(
+                oa.analysis_type, 
+                json_build_object(
+                    'analysis_result', oa.analysis_result,
+                    'model_used', oa.model_used,
+                    'confidence_score', oa.confidence_score,
+                    'created_at', oa.created_at
+                )
+            ) as analyses
+        FROM media_items mi
+        JOIN ollama_analysis oa ON mi.id = oa.media_item_id
         LEFT JOIN media_genres mg ON mi.id = mg.media_item_id
         LEFT JOIN genres g ON mg.genre_id = g.id
         WHERE oa.analysis_result IS NOT NULL
         """
         
-        # Add filter for new records only
+        params = []
         if existing_ids and len(existing_ids) > 0:
             placeholders = ','.join(['%s'] * len(existing_ids))
-            base_query += f" AND oa.id::text NOT IN ({placeholders})"
+            base_query += f" AND mi.id::text NOT IN ({placeholders})"
+            params.extend(list(existing_ids))
         
         query = base_query + """
-        GROUP BY oa.id, oa.media_item_id, oa.analysis_type, oa.model_used, 
-                 oa.analysis_result, oa.confidence_score, oa.created_at,
-                 mi.title, mi.media_type, mi.release_date, mi.overview, mi.tagline
-        ORDER BY oa.created_at DESC
+        GROUP BY mi.id, mi.title, mi.media_type, mi.release_date, mi.overview, mi.tagline
+        ORDER BY mi.date_added DESC
         """
         
         try:
-            cursor = self.postgres_conn.cursor() # type: ignore
-            if existing_ids and len(existing_ids) > 0:
-                cursor.execute(query, list(existing_ids))
-            else:
-                cursor.execute(query)
-                
-            columns = [desc[0] for desc in cursor.description] # type: ignore
-            results = []
+            cursor = self.postgres_conn.cursor()
+            cursor.execute(query, params)
+
+            columns = [desc[0] for desc in cursor.description] if cursor.description else []
+            results = [dict(zip(columns, row)) for row in cursor.fetchall()]
             
-            for row in cursor.fetchall():
-                results.append(dict(zip(columns, row)))
-                
             cursor.close()
-            self.logger.info(f"Fetched {len(results)} new analysis records")
+            self.logger.info(f"Fetched {len(results)} new media items for embedding")
             return results
             
         except Exception as e:
             self.logger.error(f"Failed to fetch data: {e}")
             return []
-            
-    def create_embeddings_text(self, record: Dict[str, Any]) -> Tuple[str, str]:
-        """Create text for embeddings based on analysis type."""
-        analysis_result = record['analysis_result']
+
+    def create_embeddings_text(self, record: Dict[str, Any], analysis_type: str, analysis_data: Dict[str, Any]) -> str:
+        """Create text for a specific analysis type."""
         base_info = f"Title: {record['title']}\nType: {record['media_type']}\n"
         
         if record['overview']:
@@ -243,11 +326,11 @@ class VectorEmbedder:
             base_info += f"Tagline: {record['tagline']}\n"
         if record['genres'] and record['genres'][0]:
             base_info += f"Genres: {', '.join(record['genres'])}\n"
-            
-        analysis_type = record['analysis_type'].lower()
+
+        analysis_result = analysis_data.get('analysis_result', {})
         
         if analysis_type == 'content_profile':
-            content_text = base_info + f"""
+            return base_info + f"""
 Content Profile:
 Primary Themes: {', '.join(analysis_result.get('primary_themes', []))}
 Mood Tags: {', '.join(analysis_result.get('mood_tags', []))}
@@ -257,17 +340,8 @@ Key Elements: {', '.join(analysis_result.get('key_elements', []))}
 Standout Features: {', '.join(analysis_result.get('standout_features', []))}
 """.strip()
             
-            analysis_text = f"""
-Analysis Type: Content Profile
-Complexity Level: {analysis_result.get('complexity_level', 0)}
-Emotional Intensity: {analysis_result.get('emotional_intensity', 0)}
-Similar Vibes: {', '.join(analysis_result.get('similar_vibes', []))}
-Content Warnings: {', '.join(analysis_result.get('content_warnings', []))}
-Recommended Context: {analysis_result.get('recommended_viewing_context', '')}
-""".strip()
-            
         elif analysis_type == 'mood_analysis':
-            content_text = base_info + f"""
+            return base_info + f"""
 Mood Analysis:
 Overall Mood: {analysis_result.get('overall_mood', '')}
 Pace: {analysis_result.get('pace', '')}
@@ -275,192 +349,191 @@ Energy Level: {analysis_result.get('energy_level', 0)}
 Emotional Weight: {analysis_result.get('emotional_weight', '')}
 """.strip()
             
-            analysis_text = f"""
-Analysis Type: Mood Analysis
-Humor Level: {analysis_result.get('humor_level', 0)}
-Tension Level: {analysis_result.get('tension_level', 0)}
-Darkness Level: {analysis_result.get('darkness_level', 0)}
-Atmosphere: {', '.join(analysis_result.get('atmosphere_tags', []))}
-Mood Progression: {analysis_result.get('mood_progression', '')}
-Viewer Experience: {analysis_result.get('viewer_experience', '')}
-""".strip()
-            
         elif analysis_type == 'theme_analysis':
-            content_text = base_info + f"""
+            return base_info + f"""
 Theme Analysis:
 Major Themes: {', '.join(analysis_result.get('major_themes', []))}
 Minor Themes: {', '.join(analysis_result.get('minor_themes', []))}
 Cultural Context: {analysis_result.get('cultural_context', '')}
 """.strip()
             
-            analysis_text = f"""
-Analysis Type: Theme Analysis
-Emotional Journey: {analysis_result.get('emotional_journey', '')}
-Symbolic Elements: {self._format_dict_or_list(analysis_result.get('symbolic_elements', {}))}
-Character Archetypes: {self._format_dict_or_list(analysis_result.get('character_archetypes', {}))}
-Philosophical Questions: {', '.join(analysis_result.get('philosophical_questions', []))}
+        elif analysis_type == 'similarity_analysis':
+            return base_info + f"""
+Similarity Analysis:
+Audience Overlap: {', '.join(analysis_result.get('audience_overlap', []))}
+Distinctive Elements: {', '.join(analysis_result.get('distinctive_elements', []))}
+Appeal Factors: {self._format_dict_or_list(analysis_result.get('appeal_factors', {}))}
 """.strip()
-        else:
-            content_text = base_info + f"Analysis: {json.dumps(analysis_result, indent=2)}"
-            analysis_text = f"Analysis Type: {analysis_type}\nContent: {json.dumps(analysis_result)}"
             
-        return content_text, analysis_text
+        elif analysis_type == 'recommendation_profile':
+            return base_info + f"""
+Recommendation Profile:
+Discovery Tags: {', '.join(analysis_result.get('discovery_tags', []))}
+User Appeal Factors: {self._format_dict_or_list(analysis_result.get('user_appeal_factors', {}))}
+Recommendation Contexts: {', '.join(analysis_result.get('recommendation_contexts', []))}
+""".strip()
+            
+        else:
+            return base_info + f"Analysis: {json.dumps(analysis_result, indent=2)}"
+
+    def extract_metadata(self, record: Dict[str, Any], analysis_type: str, analysis_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Extract metadata for a specific analysis type."""
+        analysis_result = analysis_data.get('analysis_result', {})
         
-    def extract_metadata(self, record: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-        """Extract metadata for Qdrant payloads."""
-        analysis_result = record['analysis_result']
-        
-        # Common metadata
+        created_at_val = self._parse_date(analysis_data.get('created_at'))
         common_meta = {
             "media_item_id": str(record['media_item_id']),
             "title": record['title'],
             "media_type": record['media_type'],
-            "confidence_score": float(record['confidence_score']),
-            "created_at": record['created_at'].isoformat() if record['created_at'] else None
+            "confidence_score": float(analysis_data.get('confidence_score', 0.0)),
+            "model_used": analysis_data.get('model_used', ''),
+            "created_at": created_at_val.isoformat() if created_at_val else None
         }
+
+        if analysis_type == 'content_profile':
+            return {
+                **common_meta,
+                "primary_themes": analysis_result.get('primary_themes', []),
+                "mood_tags": analysis_result.get('mood_tags', []),
+                "target_audience": analysis_result.get('target_audience', ''),
+                "complexity_level": int(analysis_result.get('complexity_level', 0)) if str(analysis_result.get('complexity_level', '0')).isdigit() else 0,
+                "emotional_intensity": int(analysis_result.get('emotional_intensity', 0)) if str(analysis_result.get('emotional_intensity', '0')).isdigit() else 0
+            }
+        return {**common_meta, **analysis_result}
         
-        # Extract release year
-        release_year = None
-        if record['release_date']:
-            release_year = record['release_date'].year
-            
-        # Media content metadata
-        content_meta = {
-            **common_meta,
-            "genres": [g for g in record['genres'] if g] if record['genres'] else [],
-            "release_year": release_year,
-            "overview": record['overview'] or "",
-            "tagline": record['tagline'] or ""
-        }
-        
-        # Media analysis metadata
-        analysis_meta = {
-            **common_meta,
-            "analysis_type": record['analysis_type'].lower(),
-            "model_used": record['model_used'],
-            "mood_tags": analysis_result.get('mood_tags', []),
-            "target_audience": analysis_result.get('target_audience', ''),
-            "complexity_level": analysis_result.get('complexity_level', 0),
-            "emotional_intensity": analysis_result.get('emotional_intensity', 0)
-        }
-        
-        return content_meta, analysis_meta
-        
-    def update_embedding_status(self, analysis_ids: List[str]):
-        """Update tracking table with successfully embedded analysis IDs."""
-        if not analysis_ids:
+    def update_embedding_status(self, media_item_ids: List[str]):
+        """Update tracking table with successfully embedded media_item_ids."""
+        if not media_item_ids:
+            return
+        if not self.postgres_conn:
+            self.logger.error("PostgreSQL connection not available.")
             return
             
         try:
-            cursor = self.postgres_conn.cursor() # type: ignore
-            values = [(aid, self.config['embed_model']) for aid in analysis_ids]
-            
-            cursor.executemany("""
-                INSERT INTO embedding_status (analysis_id, embedding_model)
-                VALUES (%s, %s)
-                ON CONFLICT (analysis_id) DO UPDATE SET
-                    embedded_at = CURRENT_TIMESTAMP,
-                    embedding_model = EXCLUDED.embedding_model
-            """, values)
-            
-            cursor.close()
-            self.logger.info(f"Updated embedding status for {len(analysis_ids)} records")
+            with self.postgres_conn.cursor() as cursor:
+                values = [(mid, self.config['embed_model']) for mid in media_item_ids]
+                
+                extras.execute_values(cursor, """
+                    INSERT INTO embedding_status (media_item_id, embedding_model)
+                    VALUES %s
+                    ON CONFLICT (media_item_id, embedding_model) DO UPDATE SET
+                        embedded_at = CURRENT_TIMESTAMP
+                """, values)
+            self.postgres_conn.commit()
+            self.logger.info(f"Updated embedding status for {len(media_item_ids)} media items")
             
         except Exception as e:
             self.logger.error(f"Failed to update embedding status: {e}")
-            
+            if self.postgres_conn:
+                self.postgres_conn.rollback()
+
     def process_batch(self, records: List[Dict[str, Any]]) -> int:
-        """Process a batch of records and store in Qdrant."""
-        content_points = []
-        analysis_points = []
+        """Process a batch of media items and their analyses."""
         processed_count = 0
-        processed_ids = []
+        processed_media_ids = []
         
         for record in records:
+            media_item_id = str(record['media_item_id'])
             try:
-                # Create embedding texts
-                content_text, analysis_text = self.create_embeddings_text(record)
-                
-                # Get embeddings
-                content_embedding = self.get_embedding(content_text)
-                analysis_embedding = self.get_embedding(analysis_text)
-                
-                if not content_embedding or not analysis_embedding:
-                    self.logger.warning(f"Failed to get embeddings for record {record['id']}")
+                # 1. Create a single content embedding for the media item
+                content_text = self.create_generic_content_text(record)
+                content_embeddings = self.get_bge_m3_embedding(content_text)
+                if not content_embeddings['dense']:
+                    self.logger.warning(f"Failed to get content embedding for media item {media_item_id}")
                     continue
-                    
-                # Extract metadata
-                content_meta, analysis_meta = self.extract_metadata(record)
+
+                content_meta = self.extract_content_metadata(record)
+                content_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"content_{media_item_id}"))
                 
-                # Create points with proper UUID format
-                content_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"content_{record['id']}"))
-                analysis_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"analysis_{record['id']}"))
-                
-                content_points.append(PointStruct(
+                content_point = PointStruct(
                     id=content_id,
-                    vector=content_embedding,
+                    vector={"dense": content_embeddings['dense'], "sparse": models.SparseVector(**content_embeddings['sparse'])},
                     payload=content_meta
-                ))
-                
-                analysis_points.append(PointStruct(
-                    id=analysis_id,
-                    vector=analysis_embedding,
-                    payload=analysis_meta
-                ))
-                
+                )
+                if self.qdrant_client:
+                    self.qdrant_client.upsert(collection_name="media_content", points=[content_point], wait=True)
+
+                # 2. Create embeddings for each analysis type
+                analyses = record.get('analyses', {})
+                for analysis_type, analysis_data in analyses.items():
+                    if not analysis_data or not analysis_data.get('analysis_result'):
+                        continue
+
+                    analysis_text = self.create_embeddings_text(record, analysis_type, analysis_data)
+                    analysis_embeddings = self.get_bge_m3_embedding(analysis_text)
+                    if not analysis_embeddings['dense']:
+                        self.logger.warning(f"Skipping {analysis_type} for {media_item_id} due to embedding failure.")
+                        continue
+
+                    analysis_meta = self.extract_metadata(record, analysis_type, analysis_data)
+                    analysis_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"analysis_{media_item_id}_{analysis_type}"))
+                    
+                    analysis_point = PointStruct(
+                        id=analysis_id,
+                        vector={"dense": analysis_embeddings['dense'], "sparse": models.SparseVector(**analysis_embeddings['sparse'])},
+                        payload=analysis_meta
+                    )
+                    
+                    collection_name = f"analysis_{analysis_type}"
+                    if self.qdrant_client:
+                        self.qdrant_client.upsert(collection_name=collection_name, points=[analysis_point], wait=True)
+
                 processed_count += 1
-                processed_ids.append(str(record['id']))
-                
+                processed_media_ids.append(media_item_id)
+                self.logger.info(f"Successfully processed media item {media_item_id}")
+
             except Exception as e:
-                self.logger.error(f"Failed to process record {record['id']}: {e}")
+                self.logger.error(f"Failed to process media item {media_item_id}: {e}")
                 continue
-                
-        # Store in Qdrant
-        try:
-            if content_points:
-                self.qdrant_client.upsert( # type: ignore
-                    collection_name="media_content",
-                    points=content_points
-                )
-                
-            if analysis_points:
-                self.qdrant_client.upsert( # type: ignore
-                    collection_name="media_analysis",
-                    points=analysis_points
-                )
-                
-            # Track successful embeddings
-            if processed_ids:
-                self.update_embedding_status(processed_ids)
-                
-            self.logger.info(f"Stored {len(content_points)} content points and {len(analysis_points)} analysis points")
-            
-        except Exception as e:
-            self.logger.error(f"Failed to store batch in Qdrant: {e}")
+        
+        if processed_media_ids:
+            self.update_embedding_status(processed_media_ids)
             
         return processed_count
+
+    def create_generic_content_text(self, record: Dict[str, Any]) -> str:
+        """Create a generic text representation for the media content."""
+        text = f"Title: {record['title']}\nType: {record['media_type']}\n"
+        if record['overview']:
+            text += f"Overview: {record['overview']}\n"
+        if record['tagline']:
+            text += f"Tagline: {record['tagline']}\n"
+        if record['genres'] and record['genres'][0] is not None:
+            text += f"Genres: {', '.join(record['genres'])}\n"
+        return text.strip()
+
+    def extract_content_metadata(self, record: Dict[str, Any]) -> Dict[str, Any]:
+        """Extract metadata for the media_content collection."""
+        release_date_obj = self._parse_date(record.get('release_date'))
+        release_year = release_date_obj.year if release_date_obj else None
+
+        return {
+            "media_item_id": str(record['media_item_id']),
+            "title": record['title'],
+            "media_type": record['media_type'],
+            "release_year": release_year,
+            "genres": [g for g in record['genres'] if g] if record.get('genres') else [],
+            "overview": record.get('overview', ''),
+            "tagline": record.get('tagline', '')
+        }
         
     def run(self):
         """Main execution method."""
-        self.logger.info("Starting vector embedding process")
+        self.logger.info("Starting BGE-M3 vector embedding process")
         
-        # Establish connections
         self.connect_postgres()
         self.connect_qdrant()
         
-        # Get existing embeddings to skip (unless forced reprocessing)
         existing_ids = set() if self.config['force_reprocess'] else self.get_existing_embeddings()
         
         if self.config['force_reprocess']:
             self.logger.info("Force reprocessing enabled - will process all records")
         
-        # Fetch only new data
         records = self.fetch_media_analysis_data(existing_ids)
         if not records:
             self.logger.info("No new data to process")
             return
             
-        # Process in batches
         batch_size = self.config['batch_size']
         total_processed = 0
         total_batches = (len(records) + batch_size - 1) // batch_size
@@ -473,34 +546,29 @@ Philosophical Questions: {', '.join(analysis_result.get('philosophical_questions
             processed = self.process_batch(batch)
             total_processed += processed
             
-        self.logger.info(f"Processing complete. Total records processed: {total_processed}")
+        self.logger.info(f"BGE-M3 embedding process complete. Total records processed: {total_processed}")
         
-        # Cleanup
         if self.postgres_conn:
             self.postgres_conn.close()
 
 
 def parse_arguments():
     """Parse command line arguments."""
-    parser = argparse.ArgumentParser(description="Vector Embedding Script for Media Analysis")
+    parser = argparse.ArgumentParser(description="BGE-M3 Vector Embedding Script for Media Analysis")
     
-    # Database arguments
     parser.add_argument('--db-host', help='PostgreSQL host')
     parser.add_argument('--db-port', type=int, help='PostgreSQL port')
     parser.add_argument('--db-user', help='PostgreSQL username')
     parser.add_argument('--db-password', help='PostgreSQL password')
     parser.add_argument('--db-name', help='PostgreSQL database name')
     
-    # Qdrant arguments
     parser.add_argument('--qdrant-host', help='Qdrant host')
     parser.add_argument('--qdrant-port', type=int, help='Qdrant port')
     
-    # Embedding arguments
     parser.add_argument('--embed-host', help='Embedding service host')
     parser.add_argument('--embed-port', type=int, help='Embedding service port')
     parser.add_argument('--embed-model', help='Embedding model name')
     
-    # Processing arguments
     parser.add_argument('--batch-size', type=int, help='Batch size for processing')
     parser.add_argument('--force-reprocess', action='store_true', help='Force reprocessing all records, ignoring existing embeddings')
     
@@ -521,8 +589,8 @@ def get_config():
         'qdrant_port': args.qdrant_port or int(os.getenv('QDRANT_PORT', '6333')),
         'embed_host': args.embed_host or os.getenv('EMBED_HOST', 'localhost'),
         'embed_port': args.embed_port or int(os.getenv('EMBED_PORT', '11434')),
-        'embed_model': args.embed_model or os.getenv('EMBED_MODEL', 'nomic-embed-text:latest'),
-        'batch_size': args.batch_size or int(os.getenv('BATCH_SIZE', '10')),
+        'embed_model': args.embed_model or os.getenv('EMBED_MODEL', 'bge-m3:latest'),
+        'batch_size': args.batch_size or int(os.getenv('BATCH_SIZE', '5')),
         'force_reprocess': args.force_reprocess
     }
     
@@ -533,6 +601,7 @@ def main():
     """Main entry point."""
     try:
         config = get_config()
+        extras.register_uuid()
         embedder = VectorEmbedder(config)
         embedder.run()
     except KeyboardInterrupt:

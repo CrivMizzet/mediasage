@@ -3,6 +3,7 @@
 Integration Orchestrator
 Coordinates the external API integration and data merging processes
 Updated to work with the DataMerger class from data_merger.py
+python integration_orchestrator.py --db-host 192.168.0.39 --db-name media_rec --db-username postgres --db-password 8g1k9ap2 --omdb-api-key 'c863fe16' --tvdb-api-key 'c8f86a37-b82c-4008-899c-5a3b9aa2f67a' --tmdb-api-key '41f5a79f118f6e78d51c26f60da97c2c' --batch-size 100
 """
 
 import argparse

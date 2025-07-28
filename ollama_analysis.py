@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Enhanced Ollama Integration Module with Debugging Features
+Enhanced Ollama Integration Module with Recommendation Engine Support
 
 Test Command:
-python ollama_analysis.py  --ollama-url "http://192.168.0.150:11434" --db-host "192.168.0.20" --db-user postgres --db-password 8g1k9ap2 --batch-size 10 --model Mjh1051702/youtube --analysis-type mood_analysis
+python ollama_analysis.py  --ollama-url "http://192.168.0.150:11434" --db-host "192.168.0.20" --db-user postgres --db-password 8g1k9ap2 --batch-size 10 --model Mjh1051702/youtube --analysis-type similarity_analysis
 """
 
 import json
@@ -12,7 +12,7 @@ import aiohttp
 import logging
 import os
 import argparse
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 from datetime import datetime, timezone
 from dataclasses import dataclass
 from enum import Enum
@@ -30,8 +30,8 @@ class AnalysisType(Enum):
     CONTENT_PROFILE = "content_profile"
     THEME_ANALYSIS = "theme_analysis" 
     MOOD_ANALYSIS = "mood_analysis"
-    SIMILARITY_ANALYSIS = "similarity_analysis"
-    RECOMMENDATION_PROFILE = "recommendation_profile"
+    SIMILARITY_ANALYSIS = "similarity_analysis"  # NEW
+    RECOMMENDATION_PROFILE = "recommendation_profile"  # NEW
 
 
 @dataclass
@@ -47,6 +47,10 @@ class MediaItem:
     content_rating: Optional[str]
     community_rating: Optional[float]
     tagline: Optional[str]
+    # Additional fields for recommendation analysis
+    existing_analysis: Optional[Dict[str, Any]] = None
+    user_rating: Optional[float] = None
+    watch_count: Optional[int] = None
 
 
 @dataclass
@@ -60,7 +64,7 @@ class AnalysisResult:
     analysis_result: Dict[str, Any]
     confidence_score: Optional[float]
     processing_time_ms: int
-    raw_response: Optional[str] = None  # Added for debugging
+    raw_response: Optional[str] = None
 
 
 class OllamaClient:
@@ -81,7 +85,7 @@ class OllamaClient:
         if self.session:
             await self.session.close()
     
-    async def generate(self, model: str, prompt: str, system: str = None) -> Dict[str, Any]: # type: ignore
+    async def generate(self, model: str, prompt: str, system: str = None) -> Dict[str, Any]:
         """Generate response from Ollama model"""
         if not self.session:
             raise RuntimeError("OllamaClient must be used as async context manager")
@@ -90,9 +94,9 @@ class OllamaClient:
             "model": model,
             "prompt": prompt,
             "stream": False,
-            "format": "json",  # Enable JSON mode
+            "format": "json",
             "options": {
-                "temperature": 0.1,  # Very low temperature for consistency
+                "temperature": 0.1,
                 "top_p": 0.9,
                 "num_predict": 2048
             }
@@ -139,8 +143,8 @@ You must respond with ONLY valid JSON in this exact format (no additional text):
     "mood_tags": ["mood1", "mood2", "mood3"],
     "style_descriptors": ["style1", "style2", "style3"],
     "target_audience": "description of target audience",
-    "complexity_level": 5,
-    "emotional_intensity": 6,
+    "complexity_level": "Approximate complexity of storyline on a scale of 1 to 10, With 1 meaning that a toddler could follow along to 10 being so confusing that nobody is sure what's happening.",
+    "emotional_intensity": "Approximate rating of how intense the emotions are in the story, with 1 being basically monotone reading and 10 being something that will make you cry or laugh harder than you ever have before",
     "recommended_viewing_context": "when/how to watch this",
     "content_warnings": ["warning1", "warning2"],
     "key_elements": ["element1", "element2", "element3"],
@@ -202,6 +206,106 @@ You must respond with ONLY valid JSON in this exact format (no additional text):
 }}
 
 Respond with JSON only."""
+        },
+
+        # NEW: Similarity Analysis
+        AnalysisType.SIMILARITY_ANALYSIS: {
+            "system": """You are a similarity analysis expert who identifies what makes content similar or different to other media. Your job is to create detailed similarity markers that help match content with similar viewing experiences. You must respond with valid JSON only.""",
+            
+            "template": """Analyze this {media_type} to identify similarity markers for recommendation matching:
+
+Title: {title}
+Overview: {overview}
+Genres: {genres}
+Release Date: {release_date}
+Runtime: {runtime_minutes} minutes
+Existing Analysis: {existing_analysis}
+
+You must respond with ONLY valid JSON in this exact format (no additional text):
+
+{{
+    "similarity_vectors": {{
+        "narrative_style": ["episodic", "linear", "non-linear"],
+        "tone_markers": ["dark", "comedic", "dramatic", "mysterious"],
+        "pacing_style": "fast-paced",
+        "visual_style": ["cinematic", "stylized", "realistic"],
+        "dialogue_style": ["witty", "naturalistic", "expository"]
+    }},
+    "appeal_factors": {{
+        "character_driven": 8,
+        "plot_driven": 6,
+        "world_building": 7,
+        "emotional_impact": 9,
+        "intellectual_engagement": 5
+    }},
+    "viewing_patterns": {{
+        "binge_worthy": true,
+        "rewatchable": true,
+        "discussion_worthy": false,
+        "background_friendly": false
+    }},
+    "audience_overlap": ["fans of X", "viewers who enjoyed Y"],
+    "distinctive_elements": ["unique_aspect1", "unique_aspect2"],
+    "recommendation_weight_factors": {{
+        "genre_importance": 0.3,
+        "mood_importance": 0.4,
+        "style_importance": 0.2,
+        "theme_importance": 0.1
+    }}
+}}
+
+Respond with JSON only."""
+        },
+
+        # NEW: Recommendation Profile
+        AnalysisType.RECOMMENDATION_PROFILE: {
+            "system": """You are a recommendation profiling expert who creates detailed profiles for matching content to user preferences. Your analysis should identify key factors that determine whether someone will enjoy this content. You must respond with valid JSON only.""",
+            
+            "template": """Create a recommendation profile for this {media_type} based on all available analysis:
+
+Title: {title}
+Overview: {overview}
+Genres: {genres}
+User Rating: {user_rating}/10
+Watch Count: {watch_count}
+Existing Analysis: {existing_analysis}
+
+You must respond with ONLY valid JSON in this exact format (no additional text):
+
+{{
+    "recommendation_categories": {{
+        "mood_based": ["cozy", "intense", "uplifting"],
+        "genre_based": ["primary_genre", "secondary_genre"],
+        "style_based": ["visual_style", "narrative_style"],
+        "theme_based": ["main_theme", "sub_theme"]
+    }},
+    "user_appeal_factors": {{
+        "accessibility": 8,
+        "depth": 6,
+        "entertainment_value": 9,
+        "emotional_engagement": 7,
+        "intellectual_stimulation": 5
+    }},
+    "recommendation_contexts": [
+        "perfect for weekend binge",
+        "great background viewing",
+        "discussion starter"
+    ],
+    "similar_content_indicators": {{
+        "must_have_elements": ["element1", "element2"],
+        "nice_to_have_elements": ["element3", "element4"],
+        "avoid_elements": ["element5"]
+    }},
+    "recommendation_strength": {{
+        "for_genre_fans": 0.9,
+        "for_casual_viewers": 0.6,
+        "for_critics": 0.7,
+        "for_binge_watchers": 0.8
+    }},
+    "discovery_tags": ["hidden_gem", "crowd_pleaser", "niche_appeal"]
+}}
+
+Respond with JSON only."""
         }
     }
     
@@ -214,6 +318,11 @@ Respond with JSON only."""
         prompt_config = cls.PROMPTS[analysis_type]
         system_prompt = prompt_config["system"]
         
+        # Format existing analysis for prompts that need it
+        existing_analysis_str = "None available"
+        if media_item.existing_analysis:
+            existing_analysis_str = json.dumps(media_item.existing_analysis, indent=2)[:1000] + "..."
+        
         user_prompt = prompt_config["template"].format(
             media_type=media_item.media_type,
             title=media_item.title,
@@ -223,7 +332,10 @@ Respond with JSON only."""
             runtime_minutes=media_item.runtime_minutes or "Unknown",
             content_rating=media_item.content_rating or "Not Rated",
             community_rating=media_item.community_rating or "Not Rated",
-            tagline=media_item.tagline or "No tagline"
+            tagline=media_item.tagline or "No tagline",
+            existing_analysis=existing_analysis_str,
+            user_rating=media_item.user_rating or "Not rated",
+            watch_count=media_item.watch_count or 0
         )
         
         return system_prompt, user_prompt
@@ -237,11 +349,36 @@ class DatabaseManager:
         
     def get_connection(self):
         """Get database connection"""
-        return psycopg2.connect(**self.connection_params) # type: ignore
+        return psycopg2.connect(**self.connection_params)
     
-    def get_media_for_analysis(self, limit: int = 50, analysis_type: AnalysisType = AnalysisType.CONTENT_PROFILE) -> List[MediaItem]:
-        """Get media items that need analysis"""
+    def get_analysis_stats(self, analysis_type: AnalysisType) -> Dict[str, int]:
+        """Get statistics about analysis coverage"""
         query = """
+        SELECT 
+            COUNT(DISTINCT mi.id) as total_media,
+            COUNT(DISTINCT oa.media_item_id) as analyzed_media,
+            COUNT(DISTINCT mi.id) - COUNT(DISTINCT oa.media_item_id) as remaining_media
+        FROM media_items mi
+        LEFT JOIN ollama_analysis oa ON mi.id = oa.media_item_id 
+            AND oa.analysis_type = %s
+        WHERE mi.is_available = true
+        """
+        
+        with self.get_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(query, (analysis_type.value,))
+                result = cur.fetchone()
+                return dict(result) if result else {"total_media": 0, "analyzed_media": 0, "remaining_media": 0}
+    
+    def get_media_for_analysis(self, limit: int = 50, analysis_type: AnalysisType = AnalysisType.CONTENT_PROFILE, force_reprocess: bool = False) -> List[MediaItem]:
+        """Get media items that need analysis"""
+        
+        # For similarity and recommendation analysis, we need existing analysis data
+        if analysis_type in [AnalysisType.SIMILARITY_ANALYSIS, AnalysisType.RECOMMENDATION_PROFILE]:
+            return self._get_media_with_existing_analysis(limit, analysis_type, force_reprocess)
+        
+        # Standard query for basic analysis types
+        base_query = """
         SELECT DISTINCT
             mi.id,
             mi.title,
@@ -260,12 +397,22 @@ class DatabaseManager:
         FROM media_items mi
         LEFT JOIN media_genres mg ON mi.id = mg.media_item_id
         LEFT JOIN genres g ON mg.genre_id = g.id
-        WHERE mi.id NOT IN (
-            SELECT DISTINCT media_item_id 
-            FROM ollama_analysis 
-            WHERE analysis_type = %s
-        )
-        AND mi.is_available = true
+        WHERE mi.is_available = true
+        """
+        
+        # Add analysis filter unless force reprocessing
+        if not force_reprocess:
+            base_query += """
+            AND mi.id NOT IN (
+                SELECT DISTINCT media_item_id 
+                FROM ollama_analysis 
+                WHERE analysis_type = %s
+                AND analysis_result IS NOT NULL
+                AND analysis_result != '{}'::jsonb
+            )
+            """
+        
+        base_query += """
         GROUP BY mi.id, mi.title, mi.media_type, mi.overview, 
                  mi.release_date, mi.runtime_minutes, mi.content_rating,
                  mi.community_rating, mi.tagline, mi.date_added
@@ -275,7 +422,10 @@ class DatabaseManager:
         
         with self.get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute(query, (analysis_type.value, limit))
+                if force_reprocess:
+                    cur.execute(base_query, (limit,))
+                else:
+                    cur.execute(base_query, (analysis_type.value, limit))
                 rows = cur.fetchall()
                 
                 return [
@@ -290,6 +440,98 @@ class DatabaseManager:
                         content_rating=row['content_rating'],
                         community_rating=float(row['community_rating']) if row['community_rating'] else None,
                         tagline=row['tagline']
+                    )
+                    for row in rows
+                ]
+
+    def _get_media_with_existing_analysis(self, limit: int, analysis_type: AnalysisType, force_reprocess: bool = False) -> List[MediaItem]:
+        """Get media items with existing analysis for similarity/recommendation analysis"""
+        base_query = """
+        SELECT 
+            mi.id,
+            mi.title,
+            mi.media_type,
+            mi.overview,
+            mi.release_date::text,
+            mi.runtime_minutes,
+            mi.content_rating,
+            mi.community_rating,
+            mi.tagline,
+            mi.date_added,
+            COALESCE(
+                ARRAY_AGG(DISTINCT g.name) FILTER (WHERE g.name IS NOT NULL), 
+                ARRAY[]::varchar[]
+            ) as genres,
+            -- Get existing analysis
+            COALESCE(
+                JSON_OBJECT_AGG(
+                    oa.analysis_type, oa.analysis_result
+                ) FILTER (WHERE oa.analysis_result IS NOT NULL),
+                '{}'::json
+            ) as existing_analysis,
+            -- Get user activity data
+            AVG(ua.rating) as user_rating,
+            MAX(ua.watch_count) as watch_count
+        FROM media_items mi
+        LEFT JOIN media_genres mg ON mi.id = mg.media_item_id
+        LEFT JOIN genres g ON mg.genre_id = g.id
+        LEFT JOIN ollama_analysis oa ON mi.id = oa.media_item_id 
+            AND oa.analysis_type IN ('content_profile', 'theme_analysis', 'mood_analysis')
+        LEFT JOIN user_activity ua ON mi.id = ua.media_item_id
+        WHERE mi.is_available = true
+        """
+        
+        # Add analysis filter unless force reprocessing
+        if not force_reprocess:
+            base_query += """
+            AND mi.id NOT IN (
+                SELECT DISTINCT media_item_id 
+                FROM ollama_analysis 
+                WHERE analysis_type = %s
+                AND analysis_result IS NOT NULL
+                AND analysis_result != '{}'::jsonb
+            )
+            """
+        
+        # Only include items that have at least one basic analysis
+        base_query += """
+        AND EXISTS (
+            SELECT 1 FROM ollama_analysis oa2 
+            WHERE oa2.media_item_id = mi.id 
+            AND oa2.analysis_type IN ('content_profile', 'mood_analysis', 'theme_analysis')
+            AND oa2.analysis_result IS NOT NULL
+            AND oa2.analysis_result != '{}'::jsonb
+        )
+        GROUP BY mi.id, mi.title, mi.media_type, mi.overview, 
+                 mi.release_date, mi.runtime_minutes, mi.content_rating,
+                 mi.community_rating, mi.tagline, mi.date_added
+        ORDER BY mi.date_added DESC
+        LIMIT %s
+        """
+        
+        with self.get_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                if force_reprocess:
+                    cur.execute(base_query, (limit,))
+                else:
+                    cur.execute(base_query, (analysis_type.value, limit))
+                rows = cur.fetchall()
+                
+                return [
+                    MediaItem(
+                        id=row['id'],
+                        title=row['title'],
+                        media_type=row['media_type'],
+                        overview=row['overview'],
+                        genres=row['genres'] or [],
+                        release_date=row['release_date'],
+                        runtime_minutes=row['runtime_minutes'],
+                        content_rating=row['content_rating'],
+                        community_rating=float(row['community_rating']) if row['community_rating'] else None,
+                        tagline=row['tagline'],
+                        existing_analysis=row['existing_analysis'],
+                        user_rating=float(row['user_rating']) if row['user_rating'] else None,
+                        watch_count=int(row['watch_count']) if row['watch_count'] else None
                     )
                     for row in rows
                 ]
@@ -347,7 +589,7 @@ class DatabaseManager:
                 conn.commit()
     
     def update_queue_status(self, media_item_id: str, analysis_type: str, 
-                           status: str, error_message: str = None) -> None: # type: ignore
+                           status: str, error_message: str = None) -> None:
         """Update analysis queue status"""
         query = """
         UPDATE analysis_queue 
@@ -374,23 +616,20 @@ class DatabaseManager:
                     cur.execute(query, (str(uuid.uuid4()), media_item_id, analysis_type, raw_response))
                     conn.commit()
         except Exception as e:
-            # If debug table doesn't exist, that's fine
             logging.debug(f"Could not save debug response: {e}")
 
 
 def extract_json_from_response(response_text: str) -> Dict[str, Any]:
     """Extract JSON from response text, handling various formats"""
     
-    # First, try to parse the entire response as JSON
     try:
         return json.loads(response_text.strip())
     except json.JSONDecodeError:
         pass
     
-    # Try to find JSON within the response using regex
     json_patterns = [
-        r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}',  # Basic nested JSON
-        r'\{.*\}',  # Any content between first { and last }
+        r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}',
+        r'\{.*\}',
     ]
     
     for pattern in json_patterns:
@@ -401,42 +640,38 @@ def extract_json_from_response(response_text: str) -> Dict[str, Any]:
             except json.JSONDecodeError:
                 continue
     
-    # If no valid JSON found, return the raw response wrapped
     return {"raw_response": response_text.strip(), "parsing_error": True}
 
 
 class MediaAnalyzer:
     """Main class for analyzing media content with Ollama"""
     
-    def __init__(self, db_manager: DatabaseManager, ollama_url: str, default_model: str = None, debug_mode: bool = False): # type: ignore
+    def __init__(self, db_manager: DatabaseManager, ollama_url: str, default_model: str = None, debug_mode: bool = False):
         self.db = db_manager
         self.ollama_url = ollama_url
         self.default_model = default_model or 'llama3:latest'
-        self.prompt_version = "1.1"  # Updated version
-        self.analysis_version = "1.1"  # Updated version
+        self.prompt_version = "1.2"  # Updated for new analysis types
+        self.analysis_version = "1.2"  # Updated for new analysis types
         self.debug_mode = debug_mode
         
     async def analyze_media_item(self, media_item: MediaItem, 
                                 analysis_type: AnalysisType = AnalysisType.CONTENT_PROFILE,
-                                model: str = None) -> Optional[AnalysisResult]: # type: ignore
+                                model: str = None) -> Optional[AnalysisResult]:
         """Analyze a single media item"""
         model_to_use = model or self.default_model
         start_time = time.time()
         
         try:
-            # Update queue status
             self.db.update_queue_status(
                 media_item.id, analysis_type.value, "processing"
             )
             
-            # Get prompts
             system_prompt, user_prompt = PromptManager.get_prompt(analysis_type, media_item)
             
             if self.debug_mode:
                 logging.info(f"System prompt for {media_item.title}: {system_prompt[:100]}...")
                 logging.info(f"User prompt for {media_item.title}: {user_prompt[:200]}...")
             
-            # Call Ollama
             async with OllamaClient(self.ollama_url) as client:
                 response = await client.generate(
                     model=model_to_use,
@@ -449,19 +684,16 @@ class MediaAnalyzer:
             
             if self.debug_mode:
                 logging.info(f"Raw response for {media_item.title}: {raw_response[:300]}...")
-                # Optionally save to debug table
                 self.db.save_debug_response(media_item.id, analysis_type.value, raw_response)
             
-            # Parse response with improved extraction
             try:
                 analysis_data = extract_json_from_response(raw_response)
                 
-                # Check if we got a parsing error
                 if analysis_data.get("parsing_error"):
                     logging.warning(f"Could not parse JSON response for {media_item.title}")
-                    confidence_score = 0.3  # Lower confidence for unparseable responses
+                    confidence_score = 0.3
                 else:
-                    confidence_score = self._calculate_confidence(response, analysis_data)
+                    confidence_score = self._calculate_confidence(response, analysis_data, analysis_type)
                     logging.info(f"Successfully parsed JSON for {media_item.title}")
                     
             except Exception as e:
@@ -469,7 +701,6 @@ class MediaAnalyzer:
                 analysis_data = {"raw_response": raw_response, "processing_error": str(e)}
                 confidence_score = 0.2
             
-            # Create result
             result = AnalysisResult(
                 media_item_id=media_item.id,
                 analysis_type=analysis_type.value,
@@ -482,7 +713,6 @@ class MediaAnalyzer:
                 raw_response=raw_response if self.debug_mode else None
             )
             
-            # Save to database
             self.db.save_analysis_result(result)
             self.db.update_queue_status(media_item.id, analysis_type.value, "completed")
             
@@ -497,30 +727,27 @@ class MediaAnalyzer:
             )
             return None
     
-    def _calculate_confidence(self, response: Dict, analysis_data: Dict) -> float:
-        """Calculate confidence score based on response quality"""
-        confidence = 0.5  # baseline
+    def _calculate_confidence(self, response: Dict, analysis_data: Dict, analysis_type: AnalysisType) -> float:
+        """Calculate confidence score based on response quality and analysis type"""
+        confidence = 0.5
         
-        # Check if we got structured data without parsing errors
         if isinstance(analysis_data, dict) and not analysis_data.get("parsing_error"):
             confidence += 0.2
         
-        # Check if we have the expected fields for the analysis type
+        # Check for expected fields based on analysis type
         expected_fields = {
-            "mood_analysis": ["overall_mood", "energy_level", "tension_level"],
-            "content_profile": ["primary_themes", "mood_tags", "style_descriptors"],
-            "theme_analysis": ["major_themes", "minor_themes", "narrative_structure"]
+            AnalysisType.MOOD_ANALYSIS: ["overall_mood", "energy_level", "tension_level"],
+            AnalysisType.CONTENT_PROFILE: ["primary_themes", "mood_tags", "style_descriptors"],
+            AnalysisType.THEME_ANALYSIS: ["major_themes", "minor_themes", "narrative_structure"],
+            AnalysisType.SIMILARITY_ANALYSIS: ["similarity_vectors", "appeal_factors", "viewing_patterns"],
+            AnalysisType.RECOMMENDATION_PROFILE: ["recommendation_categories", "user_appeal_factors", "recommendation_strength"]
         }
         
-        # Get expected fields for current analysis (this would need to be passed in)
-        # For now, just check for common fields
-        common_expected = ["overall_mood", "primary_themes", "major_themes"]
-        found_expected = sum(1 for field in common_expected if field in analysis_data)
+        type_expected = expected_fields.get(analysis_type, [])
+        if type_expected:
+            found_expected = sum(1 for field in type_expected if field in analysis_data)
+            confidence += 0.2 * (found_expected / len(type_expected))
         
-        if found_expected > 0:
-            confidence += 0.2 * (found_expected / len(common_expected))
-        
-        # Check response completeness
         if 'response' in response and len(response['response']) > 100:
             confidence += 0.1
             
@@ -528,36 +755,51 @@ class MediaAnalyzer:
     
     async def batch_analyze(self, limit: int = 10, 
                            analysis_type: AnalysisType = AnalysisType.CONTENT_PROFILE,
-                           model: str = None) -> List[AnalysisResult]: # type: ignore
+                           model: str = None, force_reprocess: bool = False) -> List[AnalysisResult]:
         """Analyze multiple media items in batch"""
-        media_items = self.db.get_media_for_analysis(limit, analysis_type)
+        
+        # Get analysis statistics first
+        stats = self.db.get_analysis_stats(analysis_type)
+        logging.info(f"Analysis Statistics for {analysis_type.value}:")
+        logging.info(f"  Total media items: {stats['total_media']}")
+        logging.info(f"  Already analyzed: {stats['analyzed_media']}")
+        logging.info(f"  Remaining to analyze: {stats['remaining_media']}")
+        
+        if force_reprocess:
+            logging.info("FORCE REPROCESS enabled - will reanalyze all items")
+        elif stats['remaining_media'] == 0:
+            logging.info("All media items have already been analyzed for this type. Use --force-reprocess to reanalyze.")
+            return []
+        
+        media_items = self.db.get_media_for_analysis(limit, analysis_type, force_reprocess)
         
         if not media_items:
             logging.info("No media items found for analysis")
             return []
         
-        logging.info(f"Starting batch analysis of {len(media_items)} items")
+        if force_reprocess:
+            logging.info(f"Starting batch reprocessing of {len(media_items)} items for {analysis_type.value}")
+        else:
+            logging.info(f"Starting batch analysis of {len(media_items)} new items for {analysis_type.value}")
+        
         results = []
         
         for i, media_item in enumerate(media_items, 1):
             logging.info(f"Processing item {i}/{len(media_items)}: {media_item.title}")
             
-            # Queue the analysis
             self.db.queue_analysis(media_item.id, analysis_type)
             
-            # Perform analysis
             result = await self.analyze_media_item(media_item, analysis_type, model)
             if result:
                 results.append(result)
             
-            # Small delay to avoid overwhelming Ollama
             await asyncio.sleep(1)
         
         logging.info(f"Completed batch analysis: {len(results)} successful")
         return results
 
 
-def get_ollama_url(args_url: str = None) -> str: # type: ignore
+def get_ollama_url(args_url: str = None) -> str:
     """Get Ollama URL from environment variable or argument"""
     if args_url:
         return args_url
@@ -568,7 +810,7 @@ def get_ollama_url(args_url: str = None) -> str: # type: ignore
     
     return "http://localhost:11434"
 
-def get_ollama_model(args_model: str = None) -> str: # type: ignore
+def get_ollama_model(args_model: str = None) -> str:
     """Get Ollama model from environment variable or argument"""
     if args_model:
         return args_model
@@ -643,22 +885,71 @@ def parse_arguments():
         type=str,
         help='Test analysis on a single media item by title'
     )
+    parser.add_argument(
+        '--force-reprocess',
+        action='store_true',
+        help='Force reprocessing of all items, even those already analyzed'
+    )
+    parser.add_argument(
+        '--show-stats',
+        action='store_true',
+        help='Show analysis statistics and exit'
+    )
     
     return parser.parse_args()
 
 
-async def test_single_item(analyzer: MediaAnalyzer, title_search: str, analysis_type: AnalysisType):
+async def test_single_item(analyzer: MediaAnalyzer, title_search: str, analysis_type: AnalysisType, force_reprocess: bool = False):
     """Test analysis on a single item by title search"""
-    query = """
-    SELECT DISTINCT
+    base_query = """
+    SELECT 
         mi.id, mi.title, mi.media_type, mi.overview, mi.release_date::text,
         mi.runtime_minutes, mi.content_rating, mi.community_rating, mi.tagline,
-        COALESCE(ARRAY_AGG(g.name) FILTER (WHERE g.name IS NOT NULL), ARRAY[]::varchar[]) as genres
+        COALESCE(ARRAY_AGG(DISTINCT g.name) FILTER (WHERE g.name IS NOT NULL), ARRAY[]::varchar[]) as genres,
+        COALESCE(
+            JSON_OBJECT_AGG(
+                oa.analysis_type, oa.analysis_result
+            ) FILTER (WHERE oa.analysis_result IS NOT NULL),
+            '{}'::json
+        ) as existing_analysis,
+        AVG(ua.rating) as user_rating,
+        MAX(ua.watch_count) as watch_count
     FROM media_items mi
     LEFT JOIN media_genres mg ON mi.id = mg.media_item_id
     LEFT JOIN genres g ON mg.genre_id = g.id
+    LEFT JOIN ollama_analysis oa ON mi.id = oa.media_item_id 
+        AND oa.analysis_type IN ('content_profile', 'theme_analysis', 'mood_analysis')
+    LEFT JOIN user_activity ua ON mi.id = ua.media_item_id
     WHERE LOWER(mi.title) LIKE LOWER(%s)
     AND mi.is_available = true
+    """
+    
+    # Check if already analyzed
+    if not force_reprocess:
+        existing_analysis_query = """
+        SELECT 1 FROM ollama_analysis 
+        WHERE media_item_id = (
+            SELECT id FROM media_items 
+            WHERE LOWER(title) LIKE LOWER(%s) 
+            AND is_available = true 
+            LIMIT 1
+        )
+        AND analysis_type = %s
+        AND analysis_result IS NOT NULL
+        AND analysis_result != '{}'::jsonb
+        """
+        
+        with analyzer.db.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(existing_analysis_query, (f"%{title_search}%", analysis_type.value))
+                already_analyzed = cur.fetchone() is not None
+                
+                if already_analyzed:
+                    logging.info(f"Item matching '{title_search}' has already been analyzed for {analysis_type.value}")
+                    logging.info("Use --force-reprocess to reanalyze")
+                    return
+    
+    base_query += """
     GROUP BY mi.id, mi.title, mi.media_type, mi.overview, mi.release_date,
              mi.runtime_minutes, mi.content_rating, mi.community_rating, mi.tagline
     LIMIT 1
@@ -666,7 +957,7 @@ async def test_single_item(analyzer: MediaAnalyzer, title_search: str, analysis_
     
     with analyzer.db.get_connection() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(query, (f"%{title_search}%",))
+            cur.execute(base_query, (f"%{title_search}%",))
             row = cur.fetchone()
             
             if not row:
@@ -683,14 +974,22 @@ async def test_single_item(analyzer: MediaAnalyzer, title_search: str, analysis_
                 runtime_minutes=row['runtime_minutes'],
                 content_rating=row['content_rating'],
                 community_rating=float(row['community_rating']) if row['community_rating'] else None,
-                tagline=row['tagline']
+                tagline=row['tagline'],
+                existing_analysis=row['existing_analysis'],
+                user_rating=float(row['user_rating']) if row['user_rating'] else None,
+                watch_count=int(row['watch_count']) if row['watch_count'] else None
             )
             
-            logging.info(f"Testing analysis on: {media_item.title}")
+            if force_reprocess:
+                logging.info(f"Force reprocessing analysis on: {media_item.title}")
+            else:
+                logging.info(f"Testing analysis on: {media_item.title}")
+            
             result = await analyzer.analyze_media_item(media_item, analysis_type)
             
             if result:
                 print(f"\nAnalysis Result for '{media_item.title}':")
+                print(f"Analysis Type: {result.analysis_type}")
                 print(f"Confidence: {result.confidence_score:.2f}")
                 print(f"Processing Time: {result.processing_time_ms}ms")
                 print(f"Analysis Result: {json.dumps(result.analysis_result, indent=2)}")
@@ -698,25 +997,40 @@ async def test_single_item(analyzer: MediaAnalyzer, title_search: str, analysis_
                     print(f"\nRaw Response: {result.raw_response[:500]}...")
 
 
+async def show_analysis_stats(analyzer: MediaAnalyzer):
+    """Show comprehensive analysis statistics"""
+    print("\n" + "="*60)
+    print("MEDIA ANALYSIS STATISTICS")
+    print("="*60)
+    
+    for analysis_type in AnalysisType:
+        stats = analyzer.db.get_analysis_stats(analysis_type)
+        print(f"\n{analysis_type.value.upper()}:")
+        print(f"  Total media items: {stats['total_media']}")
+        print(f"  Already analyzed:  {stats['analyzed_media']}")
+        print(f"  Remaining:         {stats['remaining_media']}")
+        
+        if stats['total_media'] > 0:
+            completion_pct = (stats['analyzed_media'] / stats['total_media']) * 100
+            print(f"  Completion:        {completion_pct:.1f}%")
+
+
 async def main():
     """Main function with enhanced debugging"""
     args = parse_arguments()
     
-    # Configure logging
     log_level = logging.DEBUG if args.debug else logging.INFO
     logging.basicConfig(
         level=log_level,
         format='%(asctime)s - %(levelname)s - %(message)s'
     )
     
-    # Get Ollama URL and model
     ollama_url = get_ollama_url(args.ollama_url)
     model = get_ollama_model(args.model)
     
     logging.info(f"Using Ollama URL: {ollama_url}")
     logging.info(f"Using model: {model}")
     
-    # Database configuration
     db_config = {
         'host': args.db_host or os.getenv('POSTGRES_HOST'),
         'database': args.db_name or os.getenv('POSTGRES_DATABASE'),
@@ -725,12 +1039,10 @@ async def main():
         'port': str(args.db_port) if args.db_port else os.getenv('DB_PORT', '5432')
     }
     
-    # Validate required config
     if not db_config['password']:
         print("Error: Database password required via --db-password or DB_PASSWORD env var")
         return 1
     
-    # Initialize components
     db_manager = DatabaseManager(db_config)
     analyzer = MediaAnalyzer(
         db_manager, 
@@ -739,23 +1051,35 @@ async def main():
         debug_mode=args.debug
     )
     
-    # Convert analysis type string to enum
     analysis_type = AnalysisType(args.analysis_type)
     
     try:
-        # Test single item if requested
-        if args.test_single:
-            await test_single_item(analyzer, args.test_single, analysis_type)
+        if args.show_stats:
+            await show_analysis_stats(analyzer)
             return 0
         
-        # Analyze a batch of media items
+        if args.test_single:
+            await test_single_item(analyzer, args.test_single, analysis_type, args.force_reprocess)
+            return 0
+        
+        if args.force_reprocess:
+            logging.warning("FORCE REPROCESS mode enabled - will reanalyze existing items")
+            user_confirm = input("Are you sure you want to reprocess existing analyses? (y/N): ")
+            if user_confirm.lower() != 'y':
+                logging.info("Operation cancelled")
+                return 0
+        
         results = await analyzer.batch_analyze(
             limit=args.batch_size,
             analysis_type=analysis_type,
-            model=model
+            model=model,
+            force_reprocess=args.force_reprocess
         )
         
         print(f"\nAnalyzed {len(results)} media items using model: {model}")
+        print(f"Analysis type: {analysis_type.value}")
+        if args.force_reprocess:
+            print("Mode: Force reprocessing")
         for result in results:
             print(f"- {result.media_item_id}: {result.analysis_type} "
                   f"(confidence: {result.confidence_score:.2f})")

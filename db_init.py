@@ -32,11 +32,8 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        log_folder = 'logs'
-        log_file = 'db_init.log'
-        log_path = os.path.join(log_folder, log_file)
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler(log_path)
+        logging.FileHandler('db_init.log')
     ]
 )
 logger = logging.getLogger(__name__)
